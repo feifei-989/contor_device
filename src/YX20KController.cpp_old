@@ -1,0 +1,163 @@
+
+
+#include "YX20KController.h"
+#include <fcntl.h>
+#include <termios.h>
+#include <unistd.h>
+#include <sys/select.h>
+#include <sstream>
+#include <iomanip>
+#include <regex>
+#include <chrono>
+#include <thread>
+
+namespace {
+speed_t toBaud(int b) {
+    switch (b) {
+        case 115200: return B115200;
+        case 57600:  return B57600;
+        case 38400:  return B38400;
+        case 19200:  return B19200;
+        default:     return B9600;
+    }
+}
+bool setupPort(int fd, int baud) {
+    termios t{};
+    if (tcgetattr(fd, &t)) return false;
+    cfsetispeed(&t, baud);
+    cfsetospeed(&t, baud);
+    t.c_cflag &= ~(PARENB | CSTOPB | CSIZE | CRTSCTS);
+    t.c_cflag |=  CS8 | CREAD | CLOCAL;
+    t.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
+    t.c_iflag &= ~(IXON | IXOFF | IXANY);
+    t.c_oflag &= ~OPOST;
+    t.c_cc[VMIN]=0;  t.c_cc[VTIME]=1;  
+    return tcsetattr(fd, TCSANOW, &t) == 0;
+}
+} 
+
+YX20KController::YX20KController(std::string dev,int baud)
+    : dev_(std::move(dev)), baud_(baud) {}
+YX20KController::~YX20KController() {
+    stopPositionPolling();
+    close();
+}
+
+bool YX20KController::open() {
+    if (fd_ != -1) return true;
+    fd_ = ::open(dev_.c_str(), O_RDWR | O_NOCTTY | O_SYNC);
+    if (fd_ == -1) return false;
+    if (!setupPort(fd_, toBaud(baud_))) { close(); return false; }
+    tcflush(fd_, TCIOFLUSH);
+    return true;
+}
+void YX20KController::close() {
+    if (fd_ != -1) { ::close(fd_); fd_=-1; }
+}
+bool YX20KController::isOpen() const { return fd_!=-1; }
+
+bool YX20KController::writeCmd(const std::string& cmd) {
+    std::lock_guard<std::mutex> lk(io_mtx_);
+    if (fd_==-1) return false;
+    return ::write(fd_, cmd.data(), cmd.size())==
+           static_cast<ssize_t>(cmd.size());
+}
+
+int YX20KController::writeAndRead(const std::string &cmd, uint8_t *buf, int len, int timeout_ms)
+{
+    int ret = -1;
+    std::lock_guard<std::mutex> lk(io_mtx_);
+    if (fd_==-1) return false;
+    auto r = ::write(fd_, cmd.data(), cmd.size());
+    if(r > 0){
+    	fd_set r; FD_ZERO(&r); FD_SET(fd_,&r);
+    	timeval tv{timeout_ms/1000,(timeout_ms%1000)};
+    	if (select(fd_+1,&r,nullptr,nullptr,&tv)<=0) return ret;
+    	std::string s; char ch;
+    	while (read(fd_,&ch,1)==1){ if(ch=='\n'||ch=='\r') break; s+=ch; }
+	memcpy(buf,s.c_str(),s.length());
+	ret = s.length();
+    }
+    return ret;
+}
+
+
+std::string YX20KController::readLine(int timeout_ms) {
+    std::lock_guard<std::mutex> lk(io_mtx_);
+    if (fd_==-1) return {};
+    fd_set r; FD_ZERO(&r); FD_SET(fd_,&r);
+    timeval tv{timeout_ms/1000,(timeout_ms%1000)};
+    if (select(fd_+1,&r,nullptr,nullptr,&tv)<=0) return {};
+    std::string s; char ch;
+    while (read(fd_,&ch,1)==1){ if(ch=='\n'||ch=='\r') break; s+=ch; }
+    return s;
+}
+bool YX20KController::readBytes(void* buf,std::size_t len,int timeout_ms){
+    std::lock_guard<std::mutex> lk(io_mtx_);
+    if (fd_==-1) return false;
+    fd_set r; FD_ZERO(&r); FD_SET(fd_,&r);
+    timeval tv{timeout_ms/1000,(timeout_ms%1000)};
+    if (select(fd_+1,&r,nullptr,nullptr,&tv)<=0) return false;
+    return ::read(fd_,buf,len)==static_cast<ssize_t>(len);
+}
+
+bool YX20KController::moveAbsolute(double x,double y,double z,double c,int f){
+    std::ostringstream oss;
+    oss<<std::fixed<<std::setprecision(3)
+       <<"CJXCgX"<<x<<"Y"<<y<<"Z"<<z<<"C"<<c
+       <<"F"<<f<<"$";
+    return writeCmd(oss.str());
+}
+bool YX20KController::setPosition(double x,double y,double z,double c){
+    std::ostringstream oss;
+    oss<<std::fixed<<std::setprecision(3)
+       <<"CJXC!X"<<x<<"Y"<<y<<"Z"<<z<<"C"<<c<<"$";
+    return writeCmd(oss.str());
+}
+bool YX20KController::homeX(Dir d){return writeCmd(d==Dir::Positive?"CJXZX$":"CJXZx$");}
+bool YX20KController::homeY(Dir d){return writeCmd(d==Dir::Positive?"CJXZY$":"CJXZy$");}
+bool YX20KController::homeZ(Dir d){return writeCmd(d==Dir::Positive?"CJXZZ$":"CJXZz$");}
+bool YX20KController::homeC(Dir d){return writeCmd(d==Dir::Positive?"CJXZC$":"CJXZc$");}
+
+bool YX20KController::queryPosition(Position& p,int to){
+    if(!writeCmd("CJXSA")) return false;
+    auto line=readLine(to);
+    if(line.empty()) return false;
+    std::regex re(R"(X([-\d\.]+)Y([-\d\.]+)Z([-\d\.]+)C([-\d\.]+))");
+    std::smatch m;
+    if(!std::regex_search(line,m,re)) return false;
+    p.x=std::stod(m[1]); p.y=std::stod(m[2]);
+    p.z=std::stod(m[3]); p.c=std::stod(m[4]);
+    return true;
+}
+bool YX20KController::queryInputs(IOStatus& io,int to){
+    if(!writeCmd("CJXBI")) return false;
+    uint8_t buf[4]{};
+    if(!readBytes(buf,4,to)) return false;
+    io.inputs=(uint32_t(buf[0])<<24)|(uint32_t(buf[1])<<16)|
+              (uint32_t(buf[2])<<8)|uint32_t(buf[3]);
+    return true;
+}
+
+void YX20KController::startPositionPolling(
+        int interval_ms,std::function<void(const Position&)> cb){
+    if(polling_) return;
+    polling_=true;
+    poll_th_=std::thread(&YX20KController::pollingLoop,
+                         this,interval_ms,std::move(cb));
+}
+void YX20KController::stopPositionPolling(){
+    if(!polling_) return;
+    polling_=false;
+    if(poll_th_.joinable()) poll_th_.join();
+}
+void YX20KController::pollingLoop(
+        int interval_ms,std::function<void(const Position&)> cb){
+    Position p;
+    while(polling_){
+        if(queryPosition(p)) cb(p);
+        std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+    }
+}
+
+
