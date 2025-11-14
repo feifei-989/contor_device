@@ -5,40 +5,23 @@
 #include <thread>
 #include <atomic>
 #include <functional>
-#include <string>
-
-// --- 新增头文件 ---
-#include <queue>
-#include <mutex>
-#include <condition_variable>
-#include "nlohmann/json.hpp"
-
-// JSON 命名空间别名
-using json = nlohmann::json;
 
 class CNCConsole {
 public:
     CNCConsole(std::string dev = "/dev/ttyUSB0", int baud = 115200);
     bool start();
     void stop();
-    void pushCommand(const std::string& cmd);
     void startPositionPolling(int interval_ms,
                               std::function<void(const YX20KController::Position&)> cb);
     void stopPositionPolling();
     std::shared_ptr<YX20KController> getYX20KController();
-
 private:
     void inputLoop(std::shared_ptr<YX20KController> cnc);
     static bool isNumber(const std::string& s);
-    void commandLoop();
-    void processCommand(const std::string& cmd);
-	bool parseJogCommand(const std::string& jsonString, YX20KController::JogCommand &para);
     std::string dev_;
     int         baud_;
     std::atomic<bool> running_{false};
     std::shared_ptr<YX20KController> cnc_ptr_;
-    std::thread commandThread_;              
-    std::queue<std::string> commandQueue_; 
-    std::mutex queueMutex_;                  
-    std::condition_variable queueCv_;         
 };
+
+

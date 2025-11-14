@@ -296,7 +296,7 @@
     {
         Config cfg;
         int ret = 0;
-        std::string cfg_file = "D:/work/cfg/ys_app_calibration.ini";
+        std::string cfg_file = "./ys_app_calibration.ini";
         auto r = cfg.open(cfg_file);
         if (r > 0) {
             std::string value;

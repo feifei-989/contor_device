@@ -85,7 +85,7 @@ uint16_t ModbusProtocol::packData(uint8_t type, uint8_t addr, uint8_t func, uint
    if(flag) {
    	v = response[9] << 8 | response[10];
    }
-   std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+   std::this_thread::sleep_for(std::chrono::milliseconds(200));
    return v;
 }
 
@@ -236,7 +236,7 @@ void ModbusProtocol::packReadRegisterData(uint8_t addr, uint8_t func, uint8_t va
 }
 
 std::vector<unsigned char> ModbusProtocol::stringToBytes(const std::string& str) {
-    int num;
+    int num = -1;
     try {
         num = std::stoi(str);
     } catch (...) {
@@ -244,6 +244,7 @@ std::vector<unsigned char> ModbusProtocol::stringToBytes(const std::string& str)
     }
     
     if (num < 0 || num > 65535) {
+  	printf("number = %d  str is = %s\n",num, str.c_str());
         throw std::out_of_range("数字超出范围（0～65535）");
     }
     

@@ -87,6 +87,19 @@ int YX20KController::writeAndRead(const std::string &cmd, uint8_t *buf, int len,
     return ret;
 }
 
+void YX20KController::updatePara(const JogCommand &para)
+{
+	if(move_flag_) return;
+	para_ = para;
+	if(!areFloatsEqual(gradient_, para_.gradient)) gradient_ = para_.gradient;	
+	cameraMoveAbsolute(para_.axis,para_.dir,para_.speed);
+}
+
+bool YX20KController::areFloatsEqual(float a, float b, float epsilon)
+{
+	return std::abs(a - b) <= epsilon;
+}
+
 std::string YX20KController::readLine(int timeout_ms) {
     std::lock_guard<std::mutex> lk(io_mtx_);
     if (fd_==-1) return {};
@@ -110,6 +123,27 @@ bool YX20KController::moveAbsolute(double x,double y,double z,double c,int f){
     return writeCmd(oss.str());
 }
 
+bool YX20KController::cameraMoveAbsolute(const std::string &axis, int dir, int feed)
+{	
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(3);
+    oss << "CJXCg";
+	oss << axis;
+	if(axis == "X"){
+		if(0 == dir) camera_move_x_ = last_x_ - gradient_;
+		else if(1 == dir) camera_move_x_ = last_x_ + gradient_;
+		oss << camera_move_x_;
+	}else if(axis == "Y"){
+		if(0 == dir) camera_move_y_ = last_y_ - gradient_;
+		else if(1 == dir) camera_move_y_ = last_y_ + gradient_;
+		oss << camera_move_y_;
+	}
+	oss << "F" << feed << "$";
+	std::string str = oss.str();
+	move_flag_ = true;
+    return writeCmd(str);
+}
+
 bool YX20KController::moveAbsolute2(double x, double y, double z, double c, int f, MovementCallback cb) {
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(3);
@@ -117,14 +151,14 @@ bool YX20KController::moveAbsolute2(double x, double y, double z, double c, int 
 
     bool needs_move = false;
     // For each axis, check if it needs to be moved (value is not the default and different from last time)
-    if (!isDefaultValue(x) && !isAlmostZero(x - last_x_)) { oss << "X" << x; move_x_ = x; last_x_ = x; needs_move = true; }
-    if (!isDefaultValue(z) && !isAlmostZero(z - last_z_)) { oss << "Z" << z; move_z_ = z; last_z_ = z; needs_move = true; }
-    if (!isDefaultValue(c) && !isAlmostZero(c - last_c_)) { oss << "C" << c; move_c_ = c; last_c_ = c; needs_move = true; }
+    if (!isDefaultValue(x) && !isAlmostZero(x - last_x_)) { oss << "X" << x; move_x_ = x; /*last_x_ = x;*/ needs_move = true; }
+    if (!isDefaultValue(z) && !isAlmostZero(z - last_z_)) { oss << "Z" << z; move_z_ = z; /*last_z_ = z;*/ needs_move = true; }
+    if (!isDefaultValue(c) && !isAlmostZero(c - last_c_)) { oss << "C" << c; move_c_ = c; /*last_c_ = c;*/ needs_move = true; }
 
     if (!needs_move) {
         printf("INFO: CNC axes already at target position. No movement needed.\n");
         if (cb) {
-            cb(true); // Report completion immediately via callback
+            cb(true, "CNC axes already at target position"); // Report completion immediately via callback
         } else {
             protocol_process_.sendResults("ok", 1); // Report completion via HTTP
         }
@@ -139,6 +173,29 @@ bool YX20KController::moveAbsolute2(double x, double y, double z, double c, int 
     printf("INFO: Sending selective CNC command: %s\n", str.c_str());
     return writeCmd(str);
 }
+
+int  YX20KController::cameraMove(std::string &axis, int dir, int feed)
+{
+	int ret = -1;
+	if(last_x_ < -70000 || last_z_ < -70000) return ret;
+	if(move_flag_) return ret;
+	if(!move_flag_) {
+		move_flag_ = true;
+		printf("camer move axis = %s dir = %d, feed = %d\n",axis.c_str(),dir,feed);
+	}
+	if(axis == "x" || axis == "X"){
+		if(0 == dir) last_x_ -= gradient_;
+		else if(1 == dir) last_x_ += gradient_;
+		moveAxis("X",last_x_,feed);
+	}else if(axis == "y" || axis == "Y"){
+		if(0 == dir) last_z_ -= gradient_;
+		else if(1 == dir) last_z_ += gradient_;
+		moveAxis("Y",last_z_,feed);
+	}
+	ret = 1;
+	return ret;
+}
+
 
 bool YX20KController::setPosition(double x,double y,double z,double c){
     std::ostringstream oss;
@@ -220,24 +277,42 @@ bool YX20KController::isAlmostZero(float value, float epsilon)
 void YX20KController::pollingLoop(
         int interval_ms,std::function<void(const Position&)> cb){
     Position p;
+	int cut = 0;
     while(polling_){
-        if(queryPosition(p)) {cb(p);}
+        if(queryPosition(p)) {if(cut++ % 10 == 0)cb(p);}
 	if(!fisrt_start){
-	    if(move_flag_) fisrt_start = true;
-	    move_x_ = p.x;
-	    move_z_ = p.z;
-	    move_c_ = p.c;
+	    //if(move_flag_) fisrt_start = true;
+	    last_x_ = p.x;
+	    last_z_ = p.z;
+	    last_c_ = p.c;
+		last_y_ = p.y;
 	}
+	if(camera_move_flag_){
+		if(move_flag_){
+			if(para_.axis == "X" && isAlmostZero(p.x - camera_move_x_)) move_flag_ = false;
+			else if(para_.axis == "Y" && isAlmostZero(p.x - camera_move_y_)) move_flag_ = false;
+			else move_flag_ = false;
+		}
+	}
+	else {
 	//printf("move_x_ = %f move_z_ = %f move_c_ = %f move flag = %d\n",move_x_,move_z_,move_c_,move_flag_);
 	if(move_flag_ && isAlmostZero(p.x - move_x_) && isAlmostZero(p.z - move_z_) && isAlmostZero(p.c - move_c_)){
-	   printf(">>>>>>>>>>>>>>>  X,Z,C Run to the specified location <<<<<<<<<<<<<<<<<<<\n");
-           if (current_callback_) {
-               current_callback_(true); // Execute the WebSocket callback
-           } else {
+	   if(!camera_move_flag_){
+	   		printf(">>>>>>>>>>>>>>>  X,Z,C Run to the specified location <<<<<<<<<<<<<<<<<<<\n");
+           	if (current_callback_) {
+               current_callback_(true, "x,z,c move over ...."); // Execute the WebSocket callback
+           	} else {
                protocol_process_.sendResults("ok", 1); // Fallback to HTTP feedback
-           }
-           current_callback_ = nullptr; // Reset after use
+           	}
+           	current_callback_ = nullptr; // Reset after use
+	    }
 	   move_flag_ = false;
+	}else if(move_flag_){
+	   printf("-------------------start---------------------------------\n");
+	   printf("move_x_ = %f move_z_ = %f move_c_ = %f move flag = %d\n",move_x_,move_z_,move_c_,move_flag_);
+	   printf("x = %f z = %f c = %f\n",p.x,p.z,p.c);
+	   printf("-------------------end---------------------------------\n");
+	}
 	}
         std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
     }
@@ -251,7 +326,7 @@ bool YX20KController::isDefaultValue(double val)
 bool YX20KController::moveAxis2(const std::string &axis, double position, int feed)
 {
     bool ok = false;
-    if(std::fabs(position) < 1e-6f){
+    if(std::fabs(position) < 1e-2f){
 	using Dir = YX20KController::Dir;
     	if(axis == "X"){
 	   ok = homeX(Dir::Positive);

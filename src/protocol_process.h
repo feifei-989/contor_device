@@ -20,6 +20,6 @@ class ProtocolProcess{
 	return 0;
       }
    private:
-      std::string url_ = "http://192.168.110.122:44444";
+      std::string url_ = "http://192.168.110.196:44444";
 };
 
